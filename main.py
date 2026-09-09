@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Smart Multi Downloader for Android v2.0.0 - Production Ready
-تطبيق Android يعتمد على Kivy + yt-dlp مع دعم FFmpeg عبر python-for-android
-يستخدم MediaStore API (مع IS_PENDING) لحفظ الملفات في مجلد Downloads
-بدون أذونات تخزين على Android 10+ (API 29+).
+Smart Multi Downloader for Android v2.0.0
+إصلاح بدء التشغيل: يتم تهيئة كل شيء متعلق بـ Android بعد بدء التطبيق.
 """
 
 import os
@@ -34,13 +32,12 @@ from plyer import clipboard
 
 from yt_dlp import YoutubeDL
 
-# Jnius للتعامل مع Android APIs
-from jnius import autoclass, cast
-
-# Android-specific imports (تكون متوفرة فقط على Android)
-if platform == 'android':
-    from android.permissions import request_permissions, Permission
-    from android import api_version
+# Jnius للتعامل مع Android APIs – سنقوم باستيراده فقط عند الحاجة
+# بدلاً من استيراده في الأعلى، سنقوم باستيراده داخل الدوال التي تحتاجه.
+# لكننا نحتاج إلى autoclass في دوال مثل save_to_media_store، لذا سنقوم باستيراده
+# داخل تلك الدوال، أو نستورده في الأعلى مع try/except.
+# لكن الأفضل استيراده داخل الدوال لتجنب أي مشاكل في التحميل.
+# في الكود أدناه سنقوم باستيراد jnius داخل دوال Android المحددة.
 
 # =========================
 # اسم التطبيق وإصداره
@@ -49,32 +46,70 @@ APP_NAME = "Smart Multi Downloader"
 APP_VERSION = "2.0.0"
 
 # =========================
-# دوال مساعدة للتعامل مع Android APIs
+# متغيرات عامة سيتم تهيئتها لاحقاً (Lazy)
+# =========================
+# سيتم تعيين هذه المتغيرات في App.on_start()
+_FILES_DIR = None
+_CACHE_DIR = None
+_COOKIES_FILE = None
+
+# =========================
+# دوال مساعدة – يتم استدعاؤها فقط بعد بدء التطبيق
 # =========================
 
 def get_android_context():
-    """إرجاع Context الخاص بالتطبيق (Android)"""
+    """
+    إرجاع Context الخاص بالتطبيق (Android).
+    يتم استدعاؤها فقط بعد أن يكون PythonActivity متاحاً.
+    """
+    # استيراد PythonActivity محلياً لتجنب مشاكل التحميل
     PythonActivity = autoclass('org.kivy.android.PythonActivity')
     return PythonActivity.mActivity
 
-def get_cache_dir() -> str:
-    """إرجاع مسار مجلد Cache الخاص بالتطبيق (لتخزين الملفات المؤقتة)"""
-    if platform != 'android':
-        # للاختبار على سطح المكتب (غير مستخدم في الإنتاج)
-        return os.path.join(os.path.expanduser('~'), '.cache', 'smart_downloader')
-    context = get_android_context()
-    cache_dir = context.getCacheDir()
-    return cache_dir.getAbsolutePath()
+def initialize_android_paths():
+    """
+    تهيئة المسارات الخاصة بـ Android.
+    يجب استدعاؤها من App.on_start().
+    """
+    global _FILES_DIR, _CACHE_DIR, _COOKIES_FILE
+    if platform == 'android':
+        try:
+            # استيراد autoclass هنا لضمان توفره
+            from jnius import autoclass
+            context = get_android_context()
+            _FILES_DIR = context.getFilesDir().getAbsolutePath()
+            _CACHE_DIR = context.getCacheDir().getAbsolutePath()
+            _COOKIES_FILE = os.path.join(_FILES_DIR, 'cookies.txt')
+        except Exception as e:
+            Logger.error(f"فشل تهيئة مسارات Android: {e}")
+            # تعيين قيم افتراضية آمنة لمنع انهيارات لاحقة
+            _FILES_DIR = ''
+            _CACHE_DIR = ''
+            _COOKIES_FILE = ''
+    else:
+        # سطح المكتب
+        _FILES_DIR = os.path.dirname(os.path.abspath(__file__))
+        _CACHE_DIR = os.path.join(os.path.expanduser('~'), '.cache', 'smart_downloader')
+        _COOKIES_FILE = os.path.join(_FILES_DIR, 'cookies.txt')
 
 def get_files_dir() -> str:
-    """إرجاع مسار مجلد Files الخاص بالتطبيق (للملفات الدائمة مثل cookies.txt)"""
-    if platform != 'android':
+    """إرجاع مسار مجلد Files الخاص بالتطبيق."""
+    if _FILES_DIR is None:
+        # إذا لم تتم التهيئة بعد (حالة نادرة)، نعيد قيمة افتراضية
         return os.path.dirname(os.path.abspath(__file__))
-    context = get_android_context()
-    files_dir = context.getFilesDir()
-    return files_dir.getAbsolutePath()
+    return _FILES_DIR
 
-COOKIES_FILE = os.path.join(get_files_dir(), 'cookies.txt')
+def get_cache_dir() -> str:
+    """إرجاع مسار مجلد Cache الخاص بالتطبيق."""
+    if _CACHE_DIR is None:
+        return os.path.join(os.path.expanduser('~'), '.cache', 'smart_downloader')
+    return _CACHE_DIR
+
+def get_cookies_file() -> str:
+    """إرجاع مسار ملف cookies.txt."""
+    if _COOKIES_FILE is None:
+        return os.path.join(get_files_dir(), 'cookies.txt')
+    return _COOKIES_FILE
 
 def save_to_media_store(file_path: str, display_name: str = None, mime_type: str = None) -> Optional[str]:
     """
@@ -86,14 +121,19 @@ def save_to_media_store(file_path: str, display_name: str = None, mime_type: str
         downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
         os.makedirs(downloads, exist_ok=True)
         dest = os.path.join(downloads, os.path.basename(file_path))
-        shutil.copy2(file_path, dest)
-        return dest
+        try:
+            shutil.copy2(file_path, dest)
+            return dest
+        except Exception as e:
+            Logger.error(f"فشل النسخ إلى Downloads: {e}")
+            return None
 
     try:
+        # استيراد Jnius محلياً
+        from jnius import autoclass
         context = get_android_context()
         contentResolver = context.getContentResolver()
 
-        # تحديد MIME type إذا لم يُعطَ
         if not mime_type:
             ext = os.path.splitext(file_path)[1].lower()
             if ext == '.mp4':
@@ -105,7 +145,6 @@ def save_to_media_store(file_path: str, display_name: str = None, mime_type: str
             else:
                 mime_type = 'application/octet-stream'
 
-        # استخدام MediaStore.Files مع RELATIVE_PATH = "Download/"
         MediaStore = autoclass('android.provider.MediaStore')
         ContentValues = autoclass('android.content.ContentValues')
         contentValues = ContentValues()
@@ -119,34 +158,28 @@ def save_to_media_store(file_path: str, display_name: str = None, mime_type: str
 
         # إضافة IS_PENDING = 1 أثناء الكتابة (لـ Android 10+)
         try:
-            # MediaStore.Files.FileColumns.IS_PENDING متاح في API 29+
             contentValues.put(MediaStore.Files.FileColumns.IS_PENDING, 1)
         except Exception:
-            # إذا كان الإصدار أقدم، نتجاهل
             pass
 
-        # إدراج الملف في MediaStore
         uri = contentResolver.insert(MediaStore.Files.getContentUri("external"), contentValues)
         if not uri:
             Logger.error("MediaStore: فشل إنشاء URI")
             return None
 
-        # فتح OutputStream ونسخ الملف
         with open(file_path, 'rb') as f_in:
             os_stream = contentResolver.openOutputStream(uri)
             if not os_stream:
                 Logger.error("MediaStore: فشل فتح OutputStream")
-                # حذف الإدخال الذي تم إنشاؤه
                 contentResolver.delete(uri, None, None)
                 return None
-            # نسخ الملف
             data = f_in.read(8192)
             while data:
                 os_stream.write(data)
                 data = f_in.read(8192)
             os_stream.close()
 
-        # بعد الانتهاء من الكتابة، نضع IS_PENDING = 0
+        # إنهاء حالة PENDING
         try:
             updateValues = ContentValues()
             updateValues.put(MediaStore.Files.FileColumns.IS_PENDING, 0)
@@ -171,7 +204,7 @@ class DownloaderService:
         self.progress = progress_callback
         self.last_filename = None
 
-        # البحث عن FFmpeg في PATH (سيتم توفيره عبر python-for-android)
+        # البحث عن FFmpeg في PATH – آمن لأن shutil.which لا يعتمد على Android
         self.ffmpeg_path = shutil.which('ffmpeg')
         if self.ffmpeg_path:
             self.log(f"✅ FFmpeg موجود: {self.ffmpeg_path}")
@@ -193,8 +226,10 @@ class DownloaderService:
         }
         if self.ffmpeg_path:
             opts["ffmpeg_location"] = self.ffmpeg_path
-        if use_cookies and os.path.exists(COOKIES_FILE):
-            opts["cookiefile"] = COOKIES_FILE
+        # استخدام cookies.txt من المسار الصحيح الذي تم تهيئته
+        cookies_path = get_cookies_file()
+        if use_cookies and os.path.exists(cookies_path):
+            opts["cookiefile"] = cookies_path
         return opts
 
     def info_opts(self, use_cookies: bool) -> Dict[str, Any]:
@@ -205,8 +240,9 @@ class DownloaderService:
         }
         if self.ffmpeg_path:
             opts["ffmpeg_location"] = self.ffmpeg_path
-        if use_cookies and os.path.exists(COOKIES_FILE):
-            opts["cookiefile"] = COOKIES_FILE
+        cookies_path = get_cookies_file()
+        if use_cookies and os.path.exists(cookies_path):
+            opts["cookiefile"] = cookies_path
         return opts
 
     def get_info(self, url: str, use_cookies: bool) -> Dict[str, Any]:
@@ -229,15 +265,11 @@ class DownloaderService:
         return mapping.get(quality, "bv*+ba/best")
 
     def download_video_mp4(self, url: str, save_dir: str, quality: str, use_cookies: bool) -> str:
-        """
-        تحميل فيديو MP4، يعيد المسار الكامل للملف الناتج.
-        """
         os.makedirs(save_dir, exist_ok=True)
         outtmpl = os.path.join(save_dir, "%(title).120s_%(id)s.%(ext)s")
 
         opts = self.base_opts(use_cookies)
         if not self.ffmpeg_path:
-            # Fallback: تحميل ملف واحد يحتوي على فيديو وصوت
             opts["format"] = "best[ext=mp4]/best"
         else:
             opts["format"] = self.build_video_format(quality)
@@ -251,23 +283,17 @@ class DownloaderService:
         with YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        # الحصول على اسم الملف الناتج
         filename = self.last_filename
         if filename and os.path.exists(filename):
             return filename
         else:
-            # قد يكون الاسم مختلفاً بسبب القيود، نحاول البحث عن أحدث ملف
             files = [f for f in os.listdir(save_dir) if os.path.isfile(os.path.join(save_dir, f))]
             if files:
-                # نأخذ أحدث ملف معدّل
                 latest = max(files, key=lambda f: os.path.getmtime(os.path.join(save_dir, f)))
                 return os.path.join(save_dir, latest)
             raise RuntimeError("تعذر العثور على الملف المحمّل.")
 
     def download_audio_mp3(self, url: str, save_dir: str, mp3_quality: str, use_cookies: bool) -> str:
-        """
-        تحميل صوت (MP3 إذا توفر FFmpeg، وإلا التنسيق الأصلي)، يعيد المسار الكامل للملف الناتج.
-        """
         os.makedirs(save_dir, exist_ok=True)
         outtmpl = os.path.join(save_dir, "%(title).120s_%(id)s.%(ext)s")
 
@@ -342,7 +368,7 @@ class DownloaderService:
         return f"{size:.1f} PB"
 
 # =========================
-# واجهة المستخدم (Kivy) - خالية من أبعاد ثابتة
+# واجهة المستخدم (Kivy)
 # =========================
 
 class SmartDownloaderLayout(BoxLayout):
@@ -352,15 +378,15 @@ class SmartDownloaderLayout(BoxLayout):
         self.service = None
         self.worker_thread = None
         self.msg_queue = queue.Queue()
-        self.temp_dir = get_cache_dir()  # مجلد التخزين المؤقت
+
+        # لا يتم استدعاء أي دالة تعتمد على Android هنا
+        # سنقوم بتهيئة مجلد التخزين المؤقت لاحقاً في on_start
 
         # ---- عناصر الواجهة ----
-        # العنوان
         self.add_widget(Label(text=f"{APP_NAME} v{APP_VERSION}",
                               font_size='24sp', size_hint_y=None, height=50,
                               color=(0.2, 0.6, 1, 1)))
 
-        # حقل الرابط
         url_box = BoxLayout(size_hint_y=None, height=50, spacing=8)
         self.url_input = TextInput(text='', multiline=False,
                                    hint_text='أدخل رابط الميديا',
@@ -371,14 +397,12 @@ class SmartDownloaderLayout(BoxLayout):
         url_box.add_widget(paste_btn)
         self.add_widget(url_box)
 
-        # معلومات عن مجلد الحفظ (ثابت)
         info_label = Label(text="سيتم حفظ الملفات في مجلد Downloads (باستخدام MediaStore)",
                            size_hint_y=None, height=30, color=(0.7, 0.7, 0.7, 1),
                            halign='center')
         info_label.bind(size=info_label.setter('text_size'))
         self.add_widget(info_label)
 
-        # نوع التحميل
         mode_box = BoxLayout(size_hint_y=None, height=50, spacing=8)
         mode_box.add_widget(Label(text='النوع:', size_hint_x=0.25))
         self.mode_spinner = Spinner(text='Video MP4',
@@ -388,7 +412,6 @@ class SmartDownloaderLayout(BoxLayout):
         mode_box.add_widget(self.mode_spinner)
         self.add_widget(mode_box)
 
-        # جودة الفيديو
         video_box = BoxLayout(size_hint_y=None, height=50, spacing=8)
         video_box.add_widget(Label(text='جودة الفيديو:', size_hint_x=0.25))
         self.video_quality_spinner = Spinner(
@@ -399,7 +422,6 @@ class SmartDownloaderLayout(BoxLayout):
         video_box.add_widget(self.video_quality_spinner)
         self.add_widget(video_box)
 
-        # جودة MP3
         mp3_box = BoxLayout(size_hint_y=None, height=50, spacing=8)
         mp3_box.add_widget(Label(text='جودة MP3:', size_hint_x=0.25))
         self.mp3_quality_spinner = Spinner(
@@ -410,30 +432,25 @@ class SmartDownloaderLayout(BoxLayout):
         mp3_box.add_widget(self.mp3_quality_spinner)
         self.add_widget(mp3_box)
 
-        # خيار cookies
         cookies_box = BoxLayout(size_hint_y=None, height=40, spacing=8)
         self.cookies_check = CheckBox(active=False, size_hint_x=None, width=40)
         cookies_box.add_widget(self.cookies_check)
         cookies_box.add_widget(Label(text='استخدام cookies.txt (في مجلد التطبيق)'))
         self.add_widget(cookies_box)
 
-        # زر التحميل
         self.download_btn = Button(text='بدء التحميل', size_hint_y=None, height=60,
                                    background_color=(0.2, 0.5, 0.9, 1),
                                    font_size='18sp')
         self.download_btn.bind(on_press=self.start_download)
         self.add_widget(self.download_btn)
 
-        # شريط التقدم
         self.progress_bar = ProgressBar(value=0, size_hint_y=None, height=30)
         self.add_widget(self.progress_bar)
 
-        # حالة التحميل
         self.status_label = Label(text='جاهز', size_hint_y=None, height=30,
                                   color=(0.8, 0.8, 0.8, 1))
         self.add_widget(self.status_label)
 
-        # سجل التطبيق (مع تمرير)
         log_box = BoxLayout(orientation='vertical', size_hint_y=1)
         log_box.add_widget(Label(text='سجل التطبيق', size_hint_y=None, height=30,
                                  color=(0.5, 0.8, 1, 1)))
@@ -445,7 +462,6 @@ class SmartDownloaderLayout(BoxLayout):
         log_box.add_widget(scroll)
         self.add_widget(log_box)
 
-        # أزرار إضافية
         btn_row = BoxLayout(size_hint_y=None, height=50, spacing=10)
         clear_btn = Button(text='مسح السجل')
         clear_btn.bind(on_press=self.clear_log)
@@ -455,17 +471,13 @@ class SmartDownloaderLayout(BoxLayout):
         btn_row.add_widget(reset_btn)
         self.add_widget(btn_row)
 
-        # تهيئة الخدمة
-        self.service = DownloaderService(self.threadsafe_log, self.threadsafe_progress)
+        # سيتم تهيئة الخدمة لاحقاً في on_start
+        # لكننا سنقوم بتهيئتها هنا بعد أن يصبح كل شيء جاهزاً
+        # لكن يجب أن ننتظر حتى يتم تهيئة المسارات. سنقوم بتهيئة الخدمة في on_start
+        # بعد تهيئة المسارات.
 
         # معالجة الرسائل من الخيط
         Clock.schedule_interval(self.process_queue, 0.1)
-
-        # طلب الأذونات فقط إذا كان الإصدار أقل من Android 10 (API 29)
-        if platform == 'android' and api_version < 29:
-            Clock.schedule_once(lambda dt: self.request_android_permissions(), 0)
-        elif platform == 'android':
-            self.threadsafe_log("✅ Android 10+ لا يحتاج أذونات تخزين (باستخدام MediaStore).")
 
         self.on_mode_change(self.mode_spinner, self.mode_spinner.text)
 
@@ -497,13 +509,19 @@ class SmartDownloaderLayout(BoxLayout):
             self.show_popup('خطأ', 'الرجاء إدخال رابط الميديا.')
             return
 
+        # التأكد من أن مجلد التخزين المؤقت جاهز
+        cache_dir = get_cache_dir()
+        if not cache_dir:
+            self.show_popup('خطأ', 'تعذر الحصول على مجلد التخزين المؤقت.')
+            return
+
         self.download_btn.disabled = True
         self.progress_bar.value = 0
         self.status_label.text = 'جارٍ التحميل...'
 
         self.threadsafe_log('=' * 60)
         self.threadsafe_log(f'الرابط: {url}')
-        self.threadsafe_log(f'المجلد المؤقت: {self.temp_dir}')
+        self.threadsafe_log(f'المجلد المؤقت: {cache_dir}')
         self.threadsafe_log(f'النوع: {self.mode_spinner.text}')
         self.threadsafe_log(f'جودة الفيديو: {self.video_quality_spinner.text}')
         self.threadsafe_log(f'جودة MP3: {self.mp3_quality_spinner.text}')
@@ -520,6 +538,7 @@ class SmartDownloaderLayout(BoxLayout):
         try:
             use_cookies = self.cookies_check.active
             mode = self.mode_spinner.text
+            cache_dir = get_cache_dir()
 
             self.threadsafe_log('جاري قراءة معلومات الميديا...')
             info = self.service.get_info(url, use_cookies)
@@ -533,30 +552,26 @@ class SmartDownloaderLayout(BoxLayout):
             self.threadsafe_log(f'القناة: {uploader}')
             self.threadsafe_log(f'المدة: {duration}')
 
-            # تحميل الملف في المجلد المؤقت
             if mode == 'Video MP4':
                 file_path = self.service.download_video_mp4(
                     url=url,
-                    save_dir=self.temp_dir,
+                    save_dir=cache_dir,
                     quality=self.video_quality_spinner.text,
                     use_cookies=use_cookies,
                 )
             else:
                 file_path = self.service.download_audio_mp3(
                     url=url,
-                    save_dir=self.temp_dir,
+                    save_dir=cache_dir,
                     mp3_quality=self.mp3_quality_spinner.text,
                     use_cookies=use_cookies,
                 )
 
             self.threadsafe_log(f'تم التحميل إلى: {file_path}')
 
-            # حفظ الملف في MediaStore (Downloads) مع IS_PENDING
             if os.path.exists(file_path):
-                # تحديد اسم العرض (العنوان + الامتداد)
                 base, ext = os.path.splitext(os.path.basename(file_path))
                 display_name = f"{title[:100]}{ext}"
-                # تحديد mime type
                 mime_type = None
                 if ext.lower() in ('.mp4', '.m4v'):
                     mime_type = 'video/mp4'
@@ -575,7 +590,6 @@ class SmartDownloaderLayout(BoxLayout):
                     self.threadsafe_log('⚠️ فشل حفظ الملف في MediaStore، تم الاحتفاظ به مؤقتاً.')
                     self.threadsafe_log(f'الملف المؤقت: {file_path}')
 
-                # حذف الملف المؤقت (بعد النسخ إلى MediaStore)
                 try:
                     os.remove(file_path)
                 except Exception:
@@ -652,22 +666,6 @@ class SmartDownloaderLayout(BoxLayout):
                       size_hint=(0.8, 0.4))
         popup.open()
 
-    # ---- أذونات Android (للإصدارات الأقدم فقط) ----
-
-    def request_android_permissions(self):
-        if platform == 'android':
-            try:
-                perms = [Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE]
-                request_permissions(perms, callback=self.on_permissions_result)
-            except Exception as e:
-                Logger.error(f"Permissions error: {e}")
-
-    def on_permissions_result(self, permissions, grant_results):
-        if all(grant_results):
-            self.threadsafe_log('✅ تم منح أذونات التخزين (للإصدارات الأقدم).')
-        else:
-            self.threadsafe_log('⚠️ لم تُمنح الأذونات، قد لا يعمل الحفظ على Android 9 وما دونه.')
-
 # =========================
 # تطبيق Kivy الرئيسي
 # =========================
@@ -678,16 +676,62 @@ class SmartDownloaderApp(App):
         return SmartDownloaderLayout()
 
     def on_start(self):
+        """
+        يتم استدعاؤها بعد بدء التطبيق، هنا نقوم بتهيئة كل ما يعتمد على Android.
+        """
         layout = self.root
+
+        # تهيئة المسارات الخاصة بـ Android
+        try:
+            initialize_android_paths()
+        except Exception as e:
+            layout.threadsafe_log(f"❌ فشل تهيئة مسارات Android: {e}")
+            # نستمر مع قيم افتراضية إن أمكن
+
+        # الآن أصبحت المسارات جاهزة، يمكننا تهيئة الخدمة
+        layout.service = DownloaderService(layout.threadsafe_log, layout.threadsafe_progress)
+
         layout.threadsafe_log(f'{APP_NAME} v{APP_VERSION}')
-        layout.threadsafe_log(f'📁 المجلد المؤقت: {layout.temp_dir}')
+        layout.threadsafe_log(f'📁 المجلد المؤقت: {get_cache_dir()}')
         layout.threadsafe_log(f'📁 مجلد التطبيق الخاص: {get_files_dir()}')
+
+        # التحقق من FFmpeg (تم بالفعل داخل الخدمة)
+        # نعيد عرض حالة FFmpeg
         ffmpeg = shutil.which('ffmpeg')
         if ffmpeg:
             layout.threadsafe_log(f'✅ FFmpeg موجود: {ffmpeg}')
         else:
             layout.threadsafe_log('⚠️ FFmpeg غير موجود، سيتم استخدام fallback.')
+
+        # طلب الأذونات فقط إذا كان الإصدار أقل من Android 10 (API 29)
+        if platform == 'android':
+            try:
+                from android import api_version
+                if api_version < 29:
+                    layout.request_android_permissions()
+                else:
+                    layout.threadsafe_log("✅ Android 10+ لا يحتاج أذونات تخزين (باستخدام MediaStore).")
+            except Exception as e:
+                layout.threadsafe_log(f"⚠️ تعذر التحقق من إصدار Android: {e}")
+
         layout.threadsafe_log('جاهز للتحميل.')
+
+    def request_android_permissions(self):
+        """طلب أذونات التخزين للإصدارات الأقدم."""
+        if platform == 'android':
+            try:
+                from android.permissions import request_permissions, Permission
+                perms = [Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE]
+                request_permissions(perms, callback=self.on_permissions_result)
+            except Exception as e:
+                Logger.error(f"Permissions error: {e}")
+
+    def on_permissions_result(self, permissions, grant_results):
+        layout = self.root
+        if all(grant_results):
+            layout.threadsafe_log('✅ تم منح أذونات التخزين (للإصدارات الأقدم).')
+        else:
+            layout.threadsafe_log('⚠️ لم تُمنح الأذونات، قد لا يعمل الحفظ على Android 9 وما دونه.')
 
 if __name__ == '__main__':
     SmartDownloaderApp().run()
