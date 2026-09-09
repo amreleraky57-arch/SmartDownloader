@@ -1,75 +1,104 @@
-name: Build SmartDownloader APK
+name: Build Android APK
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
-  build-android:
-    name: Build Android APK
+  build:
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout project
-        uses: actions/checkout@v5
+    env:
+      # Keep buildozer's own state directory predictable
+      BUILDOZER_WARN_ON_ROOT: "1"
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
         with:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Install system dependencies
+      - name: Install system dependencies for Buildozer / python-for-android
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
             git \
-            zip \
             unzip \
+            zip \
             autoconf \
             automake \
             libtool \
+            libltdl-dev \
             pkg-config \
-            zlib1g-dev \
-            libncurses5-dev \
-            libncursesw5-dev \
-            libtinfo6 \
             cmake \
+            ccache \
+            zlib1g-dev \
+            libncurses-dev \
             libffi-dev \
             libssl-dev \
-            libltdl-dev
+            python3-dev
+
+      - name: Upgrade pip tooling
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install Cython
+        run: |
+          python -m pip install "Cython==0.29.34"
 
       - name: Install Buildozer
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "cython<3.4"
-          python -m pip install buildozer
+          python -m pip install "buildozer==1.5.0"
+          # NOTE: python-for-android is intentionally NOT pip-installed here.
+          # Buildozer manages and installs its own compatible python-for-android
+          # automatically on first run, based on buildozer.spec. Installing p4a
+          # separately (or pinning a random/nonexistent commit) causes version
+          # conflicts and broken builds, so we let Buildozer own that step.
 
-      - name: Pin python-for-android
+      - name: Show environment and build configuration
         run: |
-          python -m pip install \
-            "python-for-android @ git+https://github.com/kivy/python-for-android.git@0e8dcc0"
+          echo "===== Python version ====="
+          python --version
 
-      - name: Prepare Buildozer configuration
-        run: |
-          echo "===== buildozer.spec ====="
+          echo "===== pip version ====="
+          python -m pip --version
+
+          echo "===== Buildozer version ====="
+          buildozer version
+
+          echo "===== python-for-android (pip) status ====="
+          python -m pip show python-for-android || echo "python-for-android not pip-installed directly; it will be installed/managed by Buildozer on first run."
+
+          echo "===== buildozer.spec content ====="
           cat buildozer.spec
 
-      - name: Build APK
+      - name: Build debug APK with Buildozer
         run: |
+          # "yes |" auto-confirms Android SDK license prompts that Buildozer/p4a
+          # may ask for interactively during the first SDK/NDK setup. It does
+          # NOT suppress or hide any build errors or log output.
           yes | buildozer -v android debug
 
-      - name: Upload APK
+      - name: List generated APK files
+        run: |
+          echo "===== Contents of bin/ ====="
+          ls -la bin/ || echo "bin/ directory not found"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: SmartDownloader-APK
           path: bin/*.apk
           if-no-files-found: error
-          retention-days: 7
